@@ -65,15 +65,17 @@ def send_telegram(msg: str):
 
 
 def fetch_candles(limit=150):
+    # MEXC — tidak diblokir oleh Railway
     url = (
-        f"https://fapi.binance.com/fapi/v1/klines"
+        f"https://api.mexc.com/api/v3/klines"
         f"?symbol={SYMBOL}&interval={INTERVAL}&limit={limit}"
     )
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     data = r.json()
-    print(f"[FETCH] Dapat {len(data)} candle dari Binance")
+    print(f"[FETCH] {len(data)} candle dari MEXC OK")
     return data
+    # Format: [openTime, open, high, low, close, vol, closeTime, ...]
 
 
 def calc_ema(values: list, period: int) -> list:
@@ -99,46 +101,41 @@ def calc_macd(closes: list):
 
 
 def get_macd_states():
-    candles = fetch_candles(limit=150)
+    candles = fetch_candles(150)
     closes  = [float(c[4]) for c in candles]
+    macd    = calc_macd(closes)
 
-    macd = calc_macd(closes)
-    print(f"[MACD] Total nilai MACD: {len(macd)}")
+    print(f"[MACD] {len(macd)} nilai | "
+          f"h[-4]={macd[-4]['histogram']:.4f} "
+          f"h[-3]={macd[-3]['histogram']:.4f} "
+          f"h[-2]={macd[-2]['histogram']:.4f} "
+          f"h[-1]={macd[-1]['histogram']:.4f}")
 
-    # Butuh minimal 5 nilai agar aman akses [-1] s/d [-5]
-    if len(macd) < 5:
-        raise ValueError(f"Data MACD tidak cukup: hanya {len(macd)} nilai")
+    # candles[-1] = forming (belum close)
+    # candles[-2] = candle terakhir closed
+    # candles[-3] = 2 candle lalu closed
+    # candles[-4] = 3 candle lalu closed
 
-    # Index yang dipakai:
-    # macd[-1] = histogram candle FORMING (belum close)
-    # macd[-2] = histogram candle terakhir CLOSED
-    # macd[-3] = histogram 2 candle lalu (closed)
-    # macd[-4] = histogram 3 candle lalu (closed)
+    # WARNING: forming vs closed sebelumnya
+    warn_cur  = get_hist_state(macd[-1]["histogram"], macd[-2]["histogram"])
+    warn_prev = get_hist_state(macd[-2]["histogram"], macd[-3]["histogram"])
 
-    h = [macd[i]["histogram"] for i in [-4, -3, -2, -1]]
-    print(f"[MACD] hist[-4]={h[0]:.4f} [-3]={h[1]:.4f} [-2]={h[2]:.4f} [-1]={h[3]:.4f}")
+    # CONFIRMED: candle baru closed vs sebelumnya
+    conf_cur  = get_hist_state(macd[-2]["histogram"], macd[-3]["histogram"])
+    conf_prev = get_hist_state(macd[-3]["histogram"], macd[-4]["histogram"])
 
-    # State WARNING: candle forming sekarang vs candle closed sebelumnya
-    warn_cur_state  = get_hist_state(macd[-1]["histogram"], macd[-2]["histogram"])
-    warn_prev_state = get_hist_state(macd[-2]["histogram"], macd[-3]["histogram"])
-
-    # State CONFIRMED: candle baru closed vs candle sebelumnya
-    conf_cur_state  = get_hist_state(macd[-2]["histogram"], macd[-3]["histogram"])
-    conf_prev_state = get_hist_state(macd[-3]["histogram"], macd[-4]["histogram"])
-
-    print(f"[STATE] WARN: {warn_prev_state} → {warn_cur_state}")
-    print(f"[STATE] CONF: {conf_prev_state} → {conf_cur_state}")
+    print(f"[STATE] WARN {warn_prev}→{warn_cur} | CONF {conf_prev}→{conf_cur}")
 
     return {
-        "warn_cur":      warn_cur_state,
-        "warn_prev":     warn_prev_state,
-        "conf_cur":      conf_cur_state,
-        "conf_prev":     conf_prev_state,
-        "macd_val":      macd[-2]["macd"],
-        "signal_val":    macd[-2]["signal"],
-        "hist_val":      macd[-2]["histogram"],
-        "hist_forming":  macd[-1]["histogram"],
-        "btc":           closes[-1],
+        "warn_cur":     warn_cur,
+        "warn_prev":    warn_prev,
+        "conf_cur":     conf_cur,
+        "conf_prev":    conf_prev,
+        "macd_val":     macd[-2]["macd"],
+        "signal_val":   macd[-2]["signal"],
+        "hist_closed":  macd[-2]["histogram"],
+        "hist_forming": macd[-1]["histogram"],
+        "btc":          closes[-1],
     }
 
 
@@ -157,11 +154,11 @@ def seconds_until(target_minute: int) -> float:
 
 
 def run():
-    print(f"[START] MACD Alert Bot — {SYMBOL} 30M | Binance Futures")
+    print(f"[START] MACD Alert Bot — {SYMBOL} 30M via MEXC")
     send_telegram(
         f"🤖 <b>MACD Alert Bot aktif</b>\n"
         f"Pair: <code>{SYMBOL}</code> | TF: <code>30 menit</code>\n"
-        f"Sumber: <code>Binance Futures</code>\n\n"
+        f"Sumber: <code>MEXC</code>\n\n"
         f"🟢 Hijau Tua → Bullish menguat\n"
         f"🟩 Hijau Muda → Bullish melemah\n"
         f"🔴 Merah Tua → Bearish menguat\n"
@@ -175,20 +172,18 @@ def run():
         m   = now.minute
         s   = now.second
 
-        # ── WARNING ZONE: menit 29 atau 59, detik 0–10 ───────────────────────
+        # ── WARNING: menit 29 atau 59, detik 0–10 ────────────────────────────
         if m in (29, 59) and s < 10:
-            print(f"[{now.strftime('%H:%M:%S')} UTC] ⚡ WARNING ZONE masuk")
+            print(f"[{now.strftime('%H:%M:%S')} UTC] ⚡ WARNING ZONE")
             try:
                 data = get_macd_states()
-                warn_changed = (data["warn_cur"] != data["warn_prev"])
-
-                if warn_changed:
+                if data["warn_cur"] != data["warn_prev"]:
                     from_e  = STATE_EMOJI[data["warn_prev"]]
                     to_e    = STATE_EMOJI[data["warn_cur"]]
                     meaning = TRANSITION_MEANING.get(
                         (data["warn_prev"], data["warn_cur"]), "Perubahan state"
                     )
-                    msg = (
+                    send_telegram(
                         f"⚡ <b>WARNING — 1 Menit Sebelum Candle Close</b>\n\n"
                         f"{from_e} <b>{STATE_LABEL[data['warn_prev']]}</b>\n"
                         f"        ↓\n"
@@ -199,31 +194,26 @@ def run():
                         f"🕐 {now.strftime('%H:%M:%S UTC')}\n\n"
                         f"<i>⏳ Belum confirmed — tunggu candle close</i>"
                     )
-                    send_telegram(msg)
                 else:
-                    print(f"[WARN] Warna sama ({data['warn_cur']}) — tidak kirim")
-
+                    print(f"[WARN] Warna sama ({data['warn_cur']}) — skip")
             except Exception as e:
                 print(f"[ERROR WARNING] {e}")
 
-            # Tunggu 55 detik agar tidak re-trigger di detik berikutnya
             time.sleep(55)
             continue
 
-        # ── CONFIRMED ZONE: menit 0 atau 30, detik 5–15 ──────────────────────
+        # ── CONFIRMED: menit 0 atau 30, detik 5–15 ───────────────────────────
         if m in (0, 30) and 5 <= s <= 15:
-            print(f"[{now.strftime('%H:%M:%S')} UTC] ✅ CONFIRMED ZONE masuk")
+            print(f"[{now.strftime('%H:%M:%S')} UTC] ✅ CONFIRMED ZONE")
             try:
                 data = get_macd_states()
-                conf_changed = (data["conf_cur"] != data["conf_prev"])
-
-                if conf_changed:
+                if data["conf_cur"] != data["conf_prev"]:
                     from_e  = STATE_EMOJI[data["conf_prev"]]
                     to_e    = STATE_EMOJI[data["conf_cur"]]
                     meaning = TRANSITION_MEANING.get(
                         (data["conf_prev"], data["conf_cur"]), "Perubahan state"
                     )
-                    msg = (
+                    send_telegram(
                         f"✅ <b>CONFIRMED — Candle 30M Closed</b>\n\n"
                         f"{from_e} <b>{STATE_LABEL[data['conf_prev']]}</b>\n"
                         f"        ↓\n"
@@ -231,33 +221,25 @@ def run():
                         f"💡 <i>{meaning}</i>\n\n"
                         f"📊 MACD: <code>{fmt(data['macd_val'])}</code>\n"
                         f"📈 Signal: <code>{fmt(data['signal_val'])}</code>\n"
-                        f"📉 Histogram: <code>{fmt(data['hist_val'])}</code>\n"
+                        f"📉 Histogram: <code>{fmt(data['hist_closed'])}</code>\n"
                         f"💰 BTC: <code>${data['btc']:,.2f}</code>\n"
                         f"🕐 {now.strftime('%H:%M:%S UTC')}"
                     )
-                    send_telegram(msg)
                 else:
-                    print(f"[CONF] Warna sama ({data['conf_cur']}) — tidak kirim")
-
+                    print(f"[CONF] Warna sama ({data['conf_cur']}) — skip")
             except Exception as e:
                 print(f"[ERROR CONFIRMED] {e}")
 
             time.sleep(50)
             continue
 
-        # ── IDLE: tidur sampai mendekati event berikutnya ─────────────────────
-        candidates = []
-        for target in (29, 30, 59, 0):
-            diff = seconds_until(target)
-            candidates.append((diff, target))
-        candidates.sort()
+        # ── IDLE ──────────────────────────────────────────────────────────────
+        candidates = sorted((seconds_until(t), t) for t in (29, 30, 59, 0))
         next_diff, next_min = candidates[0]
-
         sleep_sec = max(1, next_diff - 8)
         print(
-            f"[{now.strftime('%H:%M:%S')} UTC] Idle — "
-            f"event berikutnya :{next_min:02d} "
-            f"(dalam {int(next_diff)}s) | tidur {int(sleep_sec)}s"
+            f"[{now.strftime('%H:%M:%S')} UTC] Idle → "
+            f":{next_min:02d} dalam {int(next_diff)}s | tidur {int(sleep_sec)}s"
         )
         time.sleep(sleep_sec)
 
