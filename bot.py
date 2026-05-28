@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 SYMBOL        = "BTCUSDT"
-INTERVAL      = "30m"         # format Binance
+INTERVAL      = "30m"
 FAST          = 12
 SLOW          = 26
 SIGNAL_P      = 9
@@ -69,17 +69,13 @@ def send_telegram(msg: str):
 
 
 def fetch_candles(limit=120):
-    """Ambil data dari Binance Futures (tidak diblock)."""
     url = (
         f"https://fapi.binance.com/fapi/v1/klines"
         f"?symbol={SYMBOL}&interval={INTERVAL}&limit={limit}"
     )
     r = requests.get(url, timeout=10)
     r.raise_for_status()
-    data = r.json()
-    # Binance sudah urutan lama → baru, tidak perlu reverse
-    # format: [openTime, open, high, low, close, vol, closeTime, ...]
-    return data
+    return r.json()
 
 
 def calc_ema(values: list, period: int) -> list:
@@ -109,7 +105,7 @@ def fmt(v: float) -> str:
 
 
 def run():
-    print(f"[START] MACD 4-State Alert Bot — {SYMBOL} {INTERVAL} (Binance Futures)")
+    print(f"[START] MACD 4-State Alert Bot — {SYMBOL} {INTERVAL} via Binance Futures")
     send_telegram(
         f"🤖 <b>MACD Alert Bot aktif</b>\n"
         f"Pair: <code>{SYMBOL}</code> | TF: <code>30 menit</code>\n"
@@ -127,27 +123,32 @@ def run():
 
     while True:
         try:
-            candles    = fetch_candles()
+            candles = fetch_candles()
 
-            # Binance: index 0=openTime, 4=close, 6=closeTime
-            closes     = [float(c[4]) for c in candles]
-            open_times = [int(c[0]) for c in candles]
+            # Binance format: [openTime, open, high, low, close, vol, closeTime, ...]
+            closes      = [float(c[4]) for c in candles]
+            open_times  = [int(c[0]) for c in candles]
             close_times = [int(c[6]) for c in candles]
 
-            macd_data  = calc_macd(closes)
+            macd_data = calc_macd(closes)
 
-            cur  = macd_data[-1]
-            prev = macd_data[-2]
-            pp   = macd_data[-3]
+            # Butuh minimal 3 nilai MACD
+            if len(macd_data) < 3:
+                print("[WARN] Data MACD belum cukup, skip...")
+                time.sleep(LOOP_SLEEP)
+                continue
+
+            cur  = macd_data[-1]   # candle forming (belum close)
+            prev = macd_data[-2]   # candle closed sebelumnya
+            pp   = macd_data[-3]   # 2 candle lalu
 
             cur_state  = get_hist_state(cur["histogram"],  prev["histogram"])
             prev_state = get_hist_state(prev["histogram"], pp["histogram"])
 
-            # Binance closeTime sudah ada langsung
-            macd_offset       = (SLOW - 1) + (SIGNAL_P - 1)
-            forming_idx       = macd_offset + len(macd_data) - 1
-            forming_open_ms   = open_times[forming_idx]
-            forming_close_ms  = close_times[forming_idx]
+            # Gunakan candle terakhir langsung dari raw data Binance
+            # candles[-1] = candle forming sekarang
+            forming_open_ms  = open_times[-1]
+            forming_close_ms = close_times[-1]
 
             now_ms        = int(time.time() * 1000)
             secs_to_close = max(0, (forming_close_ms - now_ms) // 1000)
