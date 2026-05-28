@@ -4,14 +4,11 @@ import requests
 from datetime import datetime, timezone
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
-SYMBOL        = "BTCUSDT"
-INTERVAL      = "30m"
-FAST          = 12
-SLOW          = 26
-SIGNAL_P      = 9
-CANDLE_SEC    = 30 * 60
-WARN_BEFORE   = 60
-LOOP_SLEEP    = 15
+SYMBOL         = "BTCUSDT"
+INTERVAL       = "30m"
+FAST           = 12
+SLOW           = 26
+SIGNAL_P       = 9
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT  = os.environ["TELEGRAM_CHAT_ID"]
@@ -34,7 +31,6 @@ STATE_LABEL = {
     STATE_MERAH_TUA:  "Merah Tua — Bearish Menguat",
     STATE_MERAH_MUDA: "Merah Muda — Bearish Melemah",
 }
-
 TRANSITION_MEANING = {
     (STATE_HIJAU_MUDA, STATE_HIJAU_TUA):  "📈 Momentum bullish kembali menguat",
     (STATE_HIJAU_TUA,  STATE_HIJAU_MUDA): "⚠️ Momentum bullish mulai melemah",
@@ -69,6 +65,7 @@ def send_telegram(msg: str):
 
 
 def fetch_candles(limit=120):
+    """Ambil candle dari Binance Futures. Sudah urutan lama → baru."""
     url = (
         f"https://fapi.binance.com/fapi/v1/klines"
         f"?symbol={SYMBOL}&interval={INTERVAL}&limit={limit}"
@@ -76,6 +73,7 @@ def fetch_candles(limit=120):
     r = requests.get(url, timeout=10)
     r.raise_for_status()
     return r.json()
+    # format tiap candle: [openTime, open, high, low, close, vol, closeTime, ...]
 
 
 def calc_ema(values: list, period: int) -> list:
@@ -100,12 +98,77 @@ def calc_macd(closes: list):
     return results
 
 
+def get_macd_states():
+    """
+    Ambil data dan hitung state histogram.
+    Selalu ambil candle fresh dari Binance.
+
+    candles[-1] = candle yang SEDANG forming (belum close)
+    candles[-2] = candle terakhir yang sudah CLOSED
+    candles[-3] = candle sebelumnya (closed)
+
+    State WARNING  → bandingkan candle[-1] forming vs candle[-2] closed
+    State CONFIRMED → bandingkan candle[-2] closed vs candle[-3] closed
+    """
+    candles = fetch_candles(limit=120)
+    closes  = [float(c[4]) for c in candles]
+
+    macd = calc_macd(closes)
+    if len(macd) < 3:
+        raise ValueError("Data MACD tidak cukup")
+
+    # Untuk WARNING: state candle forming sekarang
+    warn_cur_state  = get_hist_state(macd[-1]["histogram"], macd[-2]["histogram"])
+    warn_prev_state = get_hist_state(macd[-2]["histogram"], macd[-3]["histogram"])
+
+    # Untuk CONFIRMED: state candle yang baru saja closed (candles[-2])
+    conf_cur_state  = get_hist_state(macd[-2]["histogram"], macd[-3]["histogram"])
+    conf_prev_state = get_hist_state(macd[-3]["histogram"], macd[-4]["histogram"])
+
+    btc_price = closes[-1]
+
+    return {
+        "warn_cur":  warn_cur_state,
+        "warn_prev": warn_prev_state,
+        "conf_cur":  conf_cur_state,
+        "conf_prev": conf_prev_state,
+        "macd_val":  macd[-2]["macd"],
+        "signal_val":macd[-2]["signal"],
+        "hist_val":  macd[-2]["histogram"],
+        "hist_forming": macd[-1]["histogram"],
+        "btc":       btc_price,
+    }
+
+
 def fmt(v: float) -> str:
     return f"{'+' if v >= 0 else ''}{v:.4f}"
 
 
+def wait_until_second(target_second: int):
+    """
+    Tunggu sampai detik ke-target_second dari menit sekarang.
+    Contoh: target_second=0 → tunggu sampai detik :00 menit berikutnya
+    """
+    while True:
+        now = datetime.now(timezone.utc)
+        if now.second == target_second:
+            return
+        time.sleep(0.5)
+
+
+def seconds_until(target_minute: int, target_second: int = 0) -> float:
+    """Hitung detik sampai menit target (dalam jam yang sama)."""
+    now = datetime.now(timezone.utc)
+    target_sec_of_hour = target_minute * 60 + target_second
+    current_sec_of_hour = now.minute * 60 + now.second
+    diff = target_sec_of_hour - current_sec_of_hour
+    if diff <= 0:
+        diff += 3600  # jam berikutnya
+    return diff
+
+
 def run():
-    print(f"[START] MACD 4-State Alert Bot — {SYMBOL} {INTERVAL} via Binance Futures")
+    print(f"[START] MACD Alert Bot — {SYMBOL} 30M | Binance Futures")
     send_telegram(
         f"🤖 <b>MACD Alert Bot aktif</b>\n"
         f"Pair: <code>{SYMBOL}</code> | TF: <code>30 menit</code>\n"
@@ -114,109 +177,104 @@ def run():
         f"🟩 Hijau Muda → Bullish melemah\n"
         f"🔴 Merah Tua → Bearish menguat\n"
         f"🩷 Merah Muda → Bearish melemah\n\n"
-        f"⚡ Warning: {WARN_BEFORE}s sebelum close\n"
-        f"✅ Confirmed: saat candle close"
+        f"⚡ WARNING dikirim jam XX:29 & XX:59\n"
+        f"✅ CONFIRMED dikirim jam XX:30 & XX:00"
     )
 
-    last_warned_candle    = None
-    last_confirmed_candle = None
-
     while True:
-        try:
-            candles = fetch_candles()
+        now = datetime.now(timezone.utc)
+        m   = now.minute
+        s   = now.second
 
-            # Binance format: [openTime, open, high, low, close, vol, closeTime, ...]
-            closes      = [float(c[4]) for c in candles]
-            open_times  = [int(c[0]) for c in candles]
-            close_times = [int(c[6]) for c in candles]
-
-            macd_data = calc_macd(closes)
-
-            # Butuh minimal 3 nilai MACD
-            if len(macd_data) < 3:
-                print("[WARN] Data MACD belum cukup, skip...")
-                time.sleep(LOOP_SLEEP)
-                continue
-
-            cur  = macd_data[-1]   # candle forming (belum close)
-            prev = macd_data[-2]   # candle closed sebelumnya
-            pp   = macd_data[-3]   # 2 candle lalu
-
-            cur_state  = get_hist_state(cur["histogram"],  prev["histogram"])
-            prev_state = get_hist_state(prev["histogram"], pp["histogram"])
-
-            # Gunakan candle terakhir langsung dari raw data Binance
-            # candles[-1] = candle forming sekarang
-            forming_open_ms  = open_times[-1]
-            forming_close_ms = close_times[-1]
-
-            now_ms        = int(time.time() * 1000)
-            secs_to_close = max(0, (forming_close_ms - now_ms) // 1000)
-
-            state_changed = (cur_state != prev_state)
-            btc_price     = closes[-1]
-            now_str       = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
-
-            print(
-                f"[{now_str}] {cur_state} | prev={prev_state} | "
-                f"changed={state_changed} | close_in={secs_to_close}s"
-            )
-
-            meaning = TRANSITION_MEANING.get((prev_state, cur_state), "Perubahan state")
-            from_e  = STATE_EMOJI[prev_state]
-            to_e    = STATE_EMOJI[cur_state]
-
-            # ── WARNING ───────────────────────────────────────────────────────
-            if (
-                state_changed
-                and 0 < secs_to_close <= WARN_BEFORE
-                and forming_open_ms != last_warned_candle
-            ):
-                last_warned_candle = forming_open_ms
-                msg = (
-                    f"⚠️ <b>WARNING — {secs_to_close}s Sebelum Close</b>\n\n"
-                    f"{from_e} <b>{STATE_LABEL[prev_state]}</b>\n"
-                    f"        ↓\n"
-                    f"{to_e} <b>{STATE_LABEL[cur_state]}</b>\n\n"
-                    f"💡 <i>{meaning}</i>\n\n"
-                    f"📊 MACD: <code>{fmt(cur['macd'])}</code>\n"
-                    f"📉 Histogram: <code>{fmt(cur['histogram'])}</code>\n"
-                    f"💰 BTC: <code>${btc_price:,.2f}</code>\n"
-                    f"⏱ Close dalam: <b>{secs_to_close} detik</b>\n"
-                    f"🕐 {now_str}\n\n"
-                    f"<i>Belum confirmed — tunggu candle close</i>"
-                )
-                send_telegram(msg)
-
-            # ── CONFIRMED ─────────────────────────────────────────────────────
-            if (
-                state_changed
-                and secs_to_close <= 5
-                and forming_open_ms != last_confirmed_candle
-            ):
-                last_confirmed_candle = forming_open_ms
-                msg = (
-                    f"✅ <b>CONFIRMED — Candle 30M Closed</b>\n\n"
-                    f"{from_e} <b>{STATE_LABEL[prev_state]}</b>\n"
-                    f"        ↓\n"
-                    f"{to_e} <b>{STATE_LABEL[cur_state]}</b>\n\n"
-                    f"💡 <i>{meaning}</i>\n\n"
-                    f"📊 MACD: <code>{fmt(cur['macd'])}</code>\n"
-                    f"📈 Signal: <code>{fmt(cur['signal'])}</code>\n"
-                    f"📉 Histogram: <code>{fmt(cur['histogram'])}</code>\n"
-                    f"💰 BTC: <code>${btc_price:,.2f}</code>\n"
-                    f"🕐 {now_str}"
-                )
-                send_telegram(msg)
-
-        except Exception as e:
-            print(f"[ERROR] {e}")
+        # ── ZONA WARNING: menit ke-29 atau ke-59, detik 0–10 ─────────────────
+        if m in (29, 59) and s < 10:
+            print(f"[{now.strftime('%H:%M:%S')}] ⚡ WARNING ZONE")
             try:
-                send_telegram(f"⚠️ Bot error: <code>{e}</code>")
-            except:
-                pass
+                data = get_macd_states()
+                warn_changed = (data["warn_cur"] != data["warn_prev"])
 
-        time.sleep(LOOP_SLEEP)
+                if warn_changed:
+                    from_e = STATE_EMOJI[data["warn_prev"]]
+                    to_e   = STATE_EMOJI[data["warn_cur"]]
+                    meaning = TRANSITION_MEANING.get(
+                        (data["warn_prev"], data["warn_cur"]), "Perubahan state"
+                    )
+                    msg = (
+                        f"⚡ <b>WARNING — 1 Menit Sebelum Candle Close</b>\n\n"
+                        f"{from_e} <b>{STATE_LABEL[data['warn_prev']]}</b>\n"
+                        f"        ↓\n"
+                        f"{to_e} <b>{STATE_LABEL[data['warn_cur']]}</b>\n\n"
+                        f"💡 <i>{meaning}</i>\n\n"
+                        f"📉 Histogram forming: <code>{fmt(data['hist_forming'])}</code>\n"
+                        f"💰 BTC: <code>${data['btc']:,.2f}</code>\n"
+                        f"🕐 {now.strftime('%H:%M:%S UTC')}\n\n"
+                        f"<i>⏳ Belum confirmed — tunggu candle close</i>"
+                    )
+                    send_telegram(msg)
+                else:
+                    print(f"[WARN] Tidak ada perubahan state — tidak kirim alert")
+
+            except Exception as e:
+                print(f"[ERROR WARNING] {e}")
+
+            # Tunggu sampai keluar dari menit 29/59
+            time.sleep(55)
+            continue
+
+        # ── ZONA CONFIRMED: menit ke-0 atau ke-30, detik 5–15 ────────────────
+        # Tunggu 5 detik setelah candle close biar data Binance sudah update
+        if m in (0, 30) and 5 <= s <= 15:
+            print(f"[{now.strftime('%H:%M:%S')}] ✅ CONFIRMED ZONE")
+            try:
+                data = get_macd_states()
+                conf_changed = (data["conf_cur"] != data["conf_prev"])
+
+                if conf_changed:
+                    from_e = STATE_EMOJI[data["conf_prev"]]
+                    to_e   = STATE_EMOJI[data["conf_cur"]]
+                    meaning = TRANSITION_MEANING.get(
+                        (data["conf_prev"], data["conf_cur"]), "Perubahan state"
+                    )
+                    msg = (
+                        f"✅ <b>CONFIRMED — Candle 30M Closed</b>\n\n"
+                        f"{from_e} <b>{STATE_LABEL[data['conf_prev']]}</b>\n"
+                        f"        ↓\n"
+                        f"{to_e} <b>{STATE_LABEL[data['conf_cur']]}</b>\n\n"
+                        f"💡 <i>{meaning}</i>\n\n"
+                        f"📊 MACD: <code>{fmt(data['macd_val'])}</code>\n"
+                        f"📈 Signal: <code>{fmt(data['signal_val'])}</code>\n"
+                        f"📉 Histogram: <code>{fmt(data['hist_val'])}</code>\n"
+                        f"💰 BTC: <code>${data['btc']:,.2f}</code>\n"
+                        f"🕐 {now.strftime('%H:%M:%S UTC')}"
+                    )
+                    send_telegram(msg)
+                else:
+                    print(f"[CONF] Tidak ada perubahan state — tidak kirim alert")
+
+            except Exception as e:
+                print(f"[ERROR CONFIRMED] {e}")
+
+            # Tunggu sampai keluar dari zona ini
+            time.sleep(50)
+            continue
+
+        # ── IDLE: hitung sisa waktu ke event berikutnya ───────────────────────
+        # Event berikutnya: menit 29, 30, 59, atau 0
+        candidates = []
+        for target in (29, 30, 59, 0):
+            diff = seconds_until(target)
+            candidates.append((diff, target))
+        candidates.sort()
+        next_diff, next_min = candidates[0]
+
+        # Tidur sampai 5 detik sebelum event berikutnya
+        sleep_sec = max(1, next_diff - 5)
+        print(
+            f"[{now.strftime('%H:%M:%S')}] Idle — "
+            f"event berikutnya menit :{next_min:02d} "
+            f"(dalam {int(next_diff)}s) | tidur {int(sleep_sec)}s"
+        )
+        time.sleep(sleep_sec)
 
 
 if __name__ == "__main__":
