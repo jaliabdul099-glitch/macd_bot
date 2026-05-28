@@ -5,32 +5,22 @@ from datetime import datetime, timezone
 
 # ─── CONFIG ────────────────────────────────────────────────────────────────────
 SYMBOL        = "BTCUSDT"
-INTERVAL      = "30"          # 30 menit
+INTERVAL      = "30"
 FAST          = 12
 SLOW          = 26
 SIGNAL_P      = 9
-CANDLE_SEC    = 30 * 60       # 1800 detik
-WARN_BEFORE   = 60            # detik sebelum close → kirim warning
-LOOP_SLEEP    = 15            # cek tiap 15 detik
+CANDLE_SEC    = 30 * 60
+WARN_BEFORE   = 60
+LOOP_SLEEP    = 15
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_TOKEN"]
 TELEGRAM_CHAT  = os.environ["TELEGRAM_CHAT_ID"]
 # ───────────────────────────────────────────────────────────────────────────────
 
-# ─── 4 STATE HISTOGRAM (seperti TradingView) ───────────────────────────────────
-#
-#   HIJAU TUA   → histogram positif & bar sekarang > bar sebelumnya  (bullish menguat)
-#   HIJAU MUDA  → histogram positif & bar sekarang < bar sebelumnya  (bullish melemah)
-#   MERAH TUA   → histogram negatif & bar sekarang < bar sebelumnya  (bearish menguat)
-#   MERAH MUDA  → histogram negatif & bar sekarang > bar sebelumnya  (bearish melemah)
-#
-# Catatan: "menguat/melemah" dilihat dari nilai absolut histogram
-# ───────────────────────────────────────────────────────────────────────────────
-
-STATE_HIJAU_TUA  = "HIJAU_TUA"    # positif, menguat
-STATE_HIJAU_MUDA = "HIJAU_MUDA"   # positif, melemah
-STATE_MERAH_TUA  = "MERAH_TUA"    # negatif, menguat
-STATE_MERAH_MUDA = "MERAH_MUDA"   # negatif, melemah
+STATE_HIJAU_TUA  = "HIJAU_TUA"
+STATE_HIJAU_MUDA = "HIJAU_MUDA"
+STATE_MERAH_TUA  = "MERAH_TUA"
+STATE_MERAH_MUDA = "MERAH_MUDA"
 
 STATE_EMOJI = {
     STATE_HIJAU_TUA:  "🟢",
@@ -39,19 +29,17 @@ STATE_EMOJI = {
     STATE_MERAH_MUDA: "🩷",
 }
 STATE_LABEL = {
-    STATE_HIJAU_TUA:  "Hijau Tua (Bullish Menguat)",
-    STATE_HIJAU_MUDA: "Hijau Muda (Bullish Melemah)",
-    STATE_MERAH_TUA:  "Merah Tua (Bearish Menguat)",
-    STATE_MERAH_MUDA: "Merah Muda (Bearish Melemah)",
+    STATE_HIJAU_TUA:  "Hijau Tua — Bullish Menguat",
+    STATE_HIJAU_MUDA: "Hijau Muda — Bullish Melemah",
+    STATE_MERAH_TUA:  "Merah Tua — Bearish Menguat",
+    STATE_MERAH_MUDA: "Merah Muda — Bearish Melemah",
 }
 
-# Makna trading tiap perubahan state
 TRANSITION_MEANING = {
     (STATE_HIJAU_MUDA, STATE_HIJAU_TUA):  "📈 Momentum bullish kembali menguat",
     (STATE_HIJAU_TUA,  STATE_HIJAU_MUDA): "⚠️ Momentum bullish mulai melemah",
     (STATE_MERAH_MUDA, STATE_MERAH_TUA):  "📉 Momentum bearish kembali menguat",
     (STATE_MERAH_TUA,  STATE_MERAH_MUDA): "⚠️ Momentum bearish mulai melemah",
-    # crossover
     (STATE_MERAH_TUA,  STATE_HIJAU_MUDA): "🚀 Crossover: Bearish → Bullish",
     (STATE_MERAH_MUDA, STATE_HIJAU_MUDA): "🚀 Crossover: Bearish → Bullish",
     (STATE_HIJAU_TUA,  STATE_MERAH_MUDA): "💀 Crossover: Bullish → Bearish",
@@ -60,33 +48,22 @@ TRANSITION_MEANING = {
 
 
 def get_hist_state(hist_now: float, hist_prev: float) -> str:
-    """Tentukan state histogram berdasarkan nilai sekarang vs sebelumnya."""
     if hist_now >= 0:
-        # Positif territory
-        if abs(hist_now) >= abs(hist_prev):
-            return STATE_HIJAU_TUA   # bar makin besar → menguat
-        else:
-            return STATE_HIJAU_MUDA  # bar makin kecil → melemah
+        return STATE_HIJAU_TUA if abs(hist_now) >= abs(hist_prev) else STATE_HIJAU_MUDA
     else:
-        # Negatif territory
-        if abs(hist_now) >= abs(hist_prev):
-            return STATE_MERAH_TUA   # bar makin besar (makin negatif) → menguat
-        else:
-            return STATE_MERAH_MUDA  # bar makin kecil → melemah
+        return STATE_MERAH_TUA if abs(hist_now) >= abs(hist_prev) else STATE_MERAH_MUDA
 
 
 def send_telegram(msg: str):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT,
-        "text": msg,
-        "parse_mode": "HTML",
-        "disable_notification": False,
-    }
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json={
+            "chat_id": TELEGRAM_CHAT,
+            "text": msg,
+            "parse_mode": "HTML",
+        }, timeout=10)
         r.raise_for_status()
-        print(f"[TG SENT] {msg[:80]}...")
+        print(f"[TG] Sent OK")
     except Exception as e:
         print(f"[TG ERROR] {e}")
 
@@ -133,9 +110,8 @@ def fmt(v: float) -> str:
 def run():
     print(f"[START] MACD 4-State Alert Bot — {SYMBOL} {INTERVAL}m")
     send_telegram(
-        f"🤖 <b>MACD 4-State Alert Bot aktif</b>\n"
+        f"🤖 <b>MACD Alert Bot aktif</b>\n"
         f"Pair: <code>{SYMBOL}</code> | TF: <code>{INTERVAL} menit</code>\n\n"
-        f"Deteksi 4 state histogram:\n"
         f"🟢 Hijau Tua → Bullish menguat\n"
         f"🟩 Hijau Muda → Bullish melemah\n"
         f"🔴 Merah Tua → Bearish menguat\n"
@@ -152,24 +128,15 @@ def run():
             candles    = fetch_candles()
             closes     = [float(c[4]) for c in candles]
             open_times = [int(c[0]) for c in candles]
-
             macd_data  = calc_macd(closes)
 
-            # 3 candle terakhir dari macd_data:
-            #   [-3] = 2 candle lalu (closed) → untuk referensi prev state
-            #   [-2] = 1 candle lalu (closed) → prev state
-            #   [-1] = candle forming sekarang → current state
+            cur  = macd_data[-1]
+            prev = macd_data[-2]
+            pp   = macd_data[-3]
 
-            cur  = macd_data[-1]   # forming
-            prev = macd_data[-2]   # closed sebelumnya
-            pp   = macd_data[-3]   # closed 2 candle lalu
-
-            # State forming: bandingkan hist forming vs hist candle closed sebelumnya
             cur_state  = get_hist_state(cur["histogram"],  prev["histogram"])
-            # State prev (confirmed): bandingkan hist prev vs hist 2 candle lalu
             prev_state = get_hist_state(prev["histogram"], pp["histogram"])
 
-            # Timing candle forming
             macd_offset      = (SLOW - 1) + (SIGNAL_P - 1)
             forming_open_ms  = open_times[macd_offset + len(macd_data) - 1]
             forming_close_ms = forming_open_ms + CANDLE_SEC * 1000
@@ -181,53 +148,43 @@ def run():
             now_str       = datetime.now(timezone.utc).strftime("%H:%M:%S UTC")
 
             print(
-                f"[{now_str}] "
-                f"Hist={fmt(cur['histogram'])} | "
-                f"State={cur_state} | "
-                f"Prev={prev_state} | "
-                f"Changed={state_changed} | "
-                f"CloseIn={secs_to_close}s"
+                f"[{now_str}] {cur_state} | prev={prev_state} | "
+                f"changed={state_changed} | close_in={secs_to_close}s"
             )
 
-            meaning = TRANSITION_MEANING.get(
-                (prev_state, cur_state),
-                f"{STATE_LABEL[prev_state]} → {STATE_LABEL[cur_state]}"
-            )
+            meaning = TRANSITION_MEANING.get((prev_state, cur_state), "Perubahan state")
+            from_e  = STATE_EMOJI[prev_state]
+            to_e    = STATE_EMOJI[cur_state]
 
-            # ── WARNING: N detik sebelum close ────────────────────────────────
+            # ── WARNING ───────────────────────────────────────────────────────
             if (
                 state_changed
                 and 0 < secs_to_close <= WARN_BEFORE
                 and forming_open_ms != last_warned_candle
             ):
                 last_warned_candle = forming_open_ms
-                from_e = STATE_EMOJI[prev_state]
-                to_e   = STATE_EMOJI[cur_state]
                 msg = (
-                    f"⚠️ <b>WARNING — {secs_to_close}s Sebelum Candle Close</b>\n\n"
+                    f"⚠️ <b>WARNING — {secs_to_close}s Sebelum Close</b>\n\n"
                     f"{from_e} <b>{STATE_LABEL[prev_state]}</b>\n"
                     f"        ↓\n"
                     f"{to_e} <b>{STATE_LABEL[cur_state]}</b>\n\n"
                     f"💡 <i>{meaning}</i>\n\n"
                     f"📊 MACD: <code>{fmt(cur['macd'])}</code>\n"
-                    f"📈 Signal: <code>{fmt(cur['signal'])}</code>\n"
-                    f"📉 Histogram: <code>{fmt(cur['histogram'])}</code>\n\n"
-                    f"⏱ Close dalam: <b>{secs_to_close} detik</b>\n"
+                    f"📉 Histogram: <code>{fmt(cur['histogram'])}</code>\n"
                     f"💰 BTC: <code>${btc_price:,.2f}</code>\n"
+                    f"⏱ Close dalam: <b>{secs_to_close} detik</b>\n"
                     f"🕐 {now_str}\n\n"
                     f"<i>Belum confirmed — tunggu candle close</i>"
                 )
                 send_telegram(msg)
 
-            # ── CONFIRMED: candle close ────────────────────────────────────────
+            # ── CONFIRMED ─────────────────────────────────────────────────────
             if (
                 state_changed
                 and secs_to_close <= 5
                 and forming_open_ms != last_confirmed_candle
             ):
                 last_confirmed_candle = forming_open_ms
-                from_e = STATE_EMOJI[prev_state]
-                to_e   = STATE_EMOJI[cur_state]
                 msg = (
                     f"✅ <b>CONFIRMED — Candle 30M Closed</b>\n\n"
                     f"{from_e} <b>{STATE_LABEL[prev_state]}</b>\n"
@@ -236,7 +193,7 @@ def run():
                     f"💡 <i>{meaning}</i>\n\n"
                     f"📊 MACD: <code>{fmt(cur['macd'])}</code>\n"
                     f"📈 Signal: <code>{fmt(cur['signal'])}</code>\n"
-                    f"📉 Histogram: <code>{fmt(cur['histogram'])}</code>\n\n"
+                    f"📉 Histogram: <code>{fmt(cur['histogram'])}</code>\n"
                     f"💰 BTC: <code>${btc_price:,.2f}</code>\n"
                     f"🕐 {now_str}"
                 )
